@@ -1,0 +1,14 @@
+[Unit]
+Description=Raspi RGBLED Service
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/root/rgb-led-test/start.sh
+ExecStop=/bin/bash -c "pkill -f /root/rgb-led-test/led_web_test.py"
+WorkingDirectory=/root/rgb-led-test
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
