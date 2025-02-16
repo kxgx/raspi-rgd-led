@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=forking
-ExecStart=/root/rgb-led-test/start.sh
-ExecStop=/bin/bash -c "pkill -f /root/rgb-led-test/led_web_test.py"
-WorkingDirectory=/root/rgb-led-test
+ExecStart=/root/raspi-rgb-led/start.sh
+ExecStop=/bin/bash -c "pkill -f /root/raspi-rgb-led/led_web_test.py"
+WorkingDirectory=/root/raspi-rgb-led
 Restart=always
 User=root
 
