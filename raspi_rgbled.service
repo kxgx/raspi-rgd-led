@@ -1,14 +1,13 @@
 [Unit]
-Description=Raspi RGBLED Service
+Description=Flask App for LED Matrix Control
 After=network.target
 
 [Service]
-Type=forking
-ExecStart=/root/raspi-rgb-led/start.sh
-ExecStop=/bin/bash -c "pkill -f /root/raspi-rgb-led/led_web_test.py"
-WorkingDirectory=/root/raspi-rgb-led
-Restart=always
 User=root
+WorkingDirectory=/root/rgb-led-test/
+Environment="FLASK_APP=led_web_test.py"
+ExecStart=/usr/bin/python3.9 led_web_test.py
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
