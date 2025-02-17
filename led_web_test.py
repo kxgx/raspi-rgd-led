@@ -10,6 +10,9 @@ import os
 import sys
 import re
 import numpy as np
+import ntplib  # 新增 ntplib 库用于 NTP 时间同步
+from werkzeug.utils import secure_filename
+import requests
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'  # 设置一个密钥用于session加密
@@ -73,7 +76,6 @@ def hex_to_tuple(hex_color, order="regular"):
     g = int(hex_color[3:5], 16)
     b = int(hex_color[5:7], 16)
     adjusted_color = apply_rgb_factor((r, g, b), order)  # 调整为 (r, g, b)
- #   print(f"Hex {hex_color} -> RGB {adjusted_color}")  # 调试输出
     return adjusted_color  # 返回 (R, G, B) 元组
 
 # 显示线程基类
@@ -84,18 +86,21 @@ class DisplayThread(threading.Thread):
 
 # 时钟显示（带 RGB 调节）
 class ClockDisplay(DisplayThread):
-    def __init__(self, base_color, order):
+    def __init__(self, base_color, order, font_path, format_str, use_network_time):
         super().__init__()
         self.base_color = base_color
         self.order = order
-        self.font = ImageFont.truetype("DejaVuSans.ttf", size=10)
+        self.font_path = font_path
+        self.format_str = format_str
+        self.use_network_time = use_network_time
+        self.font = ImageFont.truetype(self.font_path, size=10)
 
     def run(self):
         image = Image.new("RGB", (matrix.width, matrix.height))
         draw = ImageDraw.Draw(image)
         while not self.stop_flag:
             image.paste((0,0,0), (0,0,matrix.width,matrix.height))
-            current_time = datetime.datetime.now().strftime("%H:%M:%S")
+            current_time = self.get_current_time()
             text_width = draw.textlength(current_time, font=self.font)
             adjusted_color = hex_to_tuple(self.base_color, self.order)  # 使用 hex_to_tuple 获取 (R, G, B) 元组
             draw.text(((matrix.width-text_width)//2, 10), 
@@ -103,16 +108,28 @@ class ClockDisplay(DisplayThread):
             matrix.SetImage(image)
             time.sleep(0.5)
 
+    def get_current_time(self):
+        if self.use_network_time:
+            try:
+                ntp_client = ntplib.NTPClient()
+                response = ntp_client.request('pool.ntp.org')
+                ntp_time = datetime.datetime.fromtimestamp(response.tx_time)
+                return ntp_time.strftime(self.format_str)
+            except Exception as e:
+                print(f"Failed to fetch network time: {e}")
+        return datetime.datetime.now().strftime(self.format_str)
+
 # 文字显示（带 RGB 调节）
 class ScrollText(DisplayThread):
-    def __init__(self, text, base_color, speed, scroll, order):
+    def __init__(self, text, base_color, speed, scroll, order, font_path):
         super().__init__()
         self.text = text
         self.base_color = base_color
         self.speed = speed
         self.scroll = scroll
         self.order = order
-        self.font = ImageFont.truetype("./fonts/原神cn.ttf", size=10)
+        self.font_path = font_path
+        self.font = ImageFont.truetype(self.font_path, size=10)
 
     def run(self):
         image = Image.new("RGB", (matrix.width, matrix.height))
@@ -272,7 +289,10 @@ def get_status():
         'uploaded_image': session.get('uploaded_image', ''),
         'video_source': session.get('video_source', ''),
         'rgb_order': session.get('rgb_order', DEFAULT_RGB_ORDER),
-        'dark_mode': session.get('dark_mode', False)
+        'dark_mode': session.get('dark_mode', False),
+        'font_path': session.get('font_path', './fonts/DejaVuSans.ttf'),
+        'clock_format': session.get('clock_format', '%H:%M:%S'),
+        'use_network_time': session.get('use_network_time', False)
     }
     return jsonify(status)
 
@@ -299,11 +319,14 @@ def list_images():
 def index():
     videos = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(tuple(ALLOWED_VIDEO_EXTENSIONS))]
     images = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(tuple(ALLOWED_IMAGE_EXTENSIONS))]
+    fonts = [f for f in os.listdir('./fonts/') if f.endswith('.ttf')]
     dark_mode = session.get('dark_mode', False)
     return render_template_string('''
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>LED Matrix Control</title>
             <style>
                 body.light-mode {
@@ -384,18 +407,26 @@ def index():
         <body class="{{ 'dark-mode' if dark_mode else 'light-mode' }}">
             <div class="container">
                 <h1>LED Matrix Control</h1>
-                
-                <!-- 暗黑模式切换 -->
                 <div class="control-group">
+                    <h3>系统控制</h3>
+                    <button onclick="fetch('/command/clear')">清空屏幕</button>
+                    <button onclick="fetch('/command/off')">关闭显示</button>
+                    <button onclick="fetch('/command/on')">开启显示</button>
                     <h3>暗黑模式</h3>
                     <label class="switch small-toggle-switch">
                         <input type="checkbox" id="darkModeToggle" {{ 'checked' if dark_mode }}>
                         <span class="slider round small-slider"></span>
                     </label>
                 </div>
-
-                <!-- RGB 通道调节 -->
                 <div class="control-group">
+                    <h3>RGB 顺序</h3>
+                    <select id="rgbOrder" onchange="setRGBOrder()">
+                        <option value="regular" {% if rgb_order == 'regular' %}selected{% endif %}>Regular (RGB)</option>
+                        <option value="grb" {% if rgb_order == 'grb' %}selected{% endif %}>GRB</option>
+                        <option value="rbg" {% if rgb_order == 'rbg' %}selected{% endif %}>RBG</option>
+                        <option value="brg" {% if rgb_order == 'brg' %}selected{% endif %}>BRG</option>
+                        <option value="bgr" {% if rgb_order == 'bgr' %}selected{% endif %}>BGR</option>
+                    </select>
                     <h3>RGB 通道调节</h3>
                     <div class="rgb-control">
                         <span class="channel-label red">Red:</span>
@@ -419,46 +450,34 @@ def index():
                 </div>
 
                 <div class="control-group">
-                    <h3>RGB 顺序</h3>
-                    <select id="rgbOrder" onchange="setRGBOrder()">
-                        <option value="regular" {% if rgb_order == 'regular' %}selected{% endif %}>Regular (RGB)</option>
-                        <option value="grb" {% if rgb_order == 'grb' %}selected{% endif %}>GRB</option>
-                        <option value="rbg" {% if rgb_order == 'rbg' %}selected{% endif %}>RBG</option>
-                        <option value="brg" {% if rgb_order == 'brg' %}selected{% endif %}>BRG</option>
-                        <option value="bgr" {% if rgb_order == 'bgr' %}selected{% endif %}>BGR</option>
-                    </select>
-                </div>
-
-                <div class="control-group">
                     <h3>文本显示</h3>
                     <form id="textForm" onsubmit="return submitForm(event)">
                         <input type="text" name="text" placeholder="输入文字" required value="{{ text }}">
                         <input type="color" name="color" value="{{ color }}">
                         <input type="range" name="speed" min="1" max="10" step="1" value="{{ speed }}">
                         <label><input type="checkbox" name="scroll" {{ 'checked' if scroll else '' }}> 滚动</label>
+                        <select name="font" required>
+                            {% for font in fonts %}
+                                <option value="./fonts/{{ font }}" {{ 'selected' if font_path == './fonts/' + font }}>{% if font|length > 20 %}{{ font[:17] }}...{% else %}{{ font }}{% endif %}</option>
+                            {% endfor %}
+                        </select>
                         <button type="submit">显示</button>
                     </form>
-                </div>
-
-                <div class="control-group">
                     <h3>时钟显示</h3>
                     <form id="clockForm" onsubmit="return submitForm(event)">
-                        <input type="color" name="color" value="#00ff00">
+                        <input type="color" name="color" value="{{ color }}">
+                        <select name="font" required>
+                            {% for font in fonts %}
+                                <option value="./fonts/{{ font }}" {{ 'selected' if font_path == './fonts/' + font }}>{% if font|length > 20 %}{{ font[:17] }}...{% else %}{{ font }}{% endif %}</option>
+                            {% endfor %}
+                        </select>
+                        <input type="text" name="format" placeholder="格式（如 %H:%M:%S）" value="{{ clock_format }}">
+                        <label><input type="checkbox" name="networkTime" {{ 'checked' if use_network_time }}> 使用网络时间</label>
                         <button type="submit">显示时钟</button>
                     </form>
-                </div>
-
-                <div class="control-group">
                     <h3>亮度调节</h3>
                     <input type="range" id="brightness" min="0" max="100" step="1" value="{{ brightness }}">
                     <button onclick="setBrightness()">设置亮度</button>
-                </div>
-
-                <div class="control-group">
-                    <h3>系统控制</h3>
-                    <button onclick="fetch('/command/clear')">清空屏幕</button>
-                    <button onclick="fetch('/command/off')">关闭显示</button>
-                    <button onclick="fetch('/command/on')">开启显示</button>
                 </div>
 
                 <div class="control-group">
@@ -470,32 +489,12 @@ def index():
                     {% if uploaded_image %}
                         <p>已上传的图片: <a href="{{ url_for('uploaded_file', filename=uploaded_image) }}">{{ uploaded_image }}</a></p>
                     {% endif %}
-                </div>
-
-                <div class="control-group">
-                    <h3>显示本地图片</h3>
+                   <h3>显示本地图片</h3>
                     <ul class="image-list" id="imageList">
                         {% for image in images %}
                             <li class="image-item" onclick="showImage('{{ image }}')">{{ image }}</li>
                         {% endfor %}
                     </ul>
-                </div>
-
-                <div class="control-group">
-                    <h3>播放视频</h3>
-                    <ul class="video-list" id="videoList">
-                        {% for video in videos %}
-                            <li class="video-item" onclick="playVideo('{{ video }}')">{{ video }}</li>
-                        {% endfor %}
-                    </ul>
-                </div>
-
-                <div class="control-group">
-                    <h3>通过 URL 播放视频</h3>
-                    <form id="videoUrlForm" onsubmit="return playVideoFromUrl(event)">
-                        <input type="text" name="url" placeholder="输入视频 URL" required>
-                        <button type="submit">播放</button>
-                    </form>
                 </div>
 
                 <div class="control-group">
@@ -509,6 +508,17 @@ def index():
                             <li class="video-item" onclick="playVideo('{{ video }}')">{{ video }}</li>
                         {% endfor %}
                     </ul>
+                    <h3>播放视频</h3>
+                    <ul class="video-list" id="videoList">
+                        {% for video in videos %}
+                            <li class="video-item" onclick="playVideo('{{ video }}')">{{ video }}</li>
+                        {% endfor %}
+                    </ul>
+                    <h3>通过 URL 播放视频</h3>
+                    <form id="videoUrlForm" onsubmit="return playVideoFromUrl(event)">
+                        <input type="text" name="url" placeholder="输入视频 URL" required>
+                        <button type="submit">播放</button>
+                    </form>
                 </div>
             </div>
 
@@ -530,29 +540,46 @@ def index():
                         document.getElementById('scroll').checked = data.scroll;
                         document.getElementById('rgbOrder').value = data.rgb_order;
                         document.getElementById('darkModeToggle').checked = data.dark_mode;
+                        document.querySelector('#clockForm select[name="font"]').value = data.font_path;
+                        document.querySelector('#clockForm input[name="format"]').value = data.clock_format;
+                        document.querySelector('#clockForm input[name="networkTime"]').checked = data.use_network_time;
+                        document.querySelector('#textForm select[name="font"]').value = data.font_path;  // 添加这一行
                     });
 
+                // 更新滑块值显示
                 function updateValue(channel, value) {
-                    document.getElementById(channel + 'Value').textContent = value + '%';
+                    document.getElementById(`${channel}Value`).textContent = `${value}%`;
                 }
 
+                // 应用 RGB 通道设置
                 function applyRGB() {
-                    const red = document.getElementById('red').value / 100;
-                    const green = document.getElementById('green').value / 100;
-                    const blue = document.getElementById('blue').value / 100;
-                    
-                    fetch(`/rgb/${red}/${green}/${blue}`)
-                        .then(response => response.text())
-                        .then(() => location.reload());
+                    const red = parseFloat(document.getElementById('red').value) / 100;
+                    const green = parseFloat(document.getElementById('green').value) / 100;
+                    const blue = parseFloat(document.getElementById('blue').value) / 100;
+
+                    fetch(`/rgb/<float:r>/<float:g>/<float:b>`, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ red, green, blue })
+                    });
                 }
 
+                // 设置亮度
                 function setBrightness() {
-                    const brightness = document.getElementById('brightness').value;
-                    fetch(`/brightness/${brightness}`)
-                        .then(response => response.text())
-                        .then(() => location.reload());
+                    const brightness = parseInt(document.getElementById('brightness').value);
+
+                    fetch(`/brightness/<int:brightness>`, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ brightness })
+                    });
                 }
 
+                // 提交表单通用函数
                 function submitForm(event) {
                     event.preventDefault(); // 阻止默认表单提交行为
                     const formId = event.target.id;
@@ -567,12 +594,16 @@ def index():
                             text: formData.get('text'),
                             color: formData.get('color'),
                             speed: parseFloat(formData.get('speed')),
-                            scroll: formData.get('scroll') !== null
+                            scroll: formData.get('scroll') !== null,
+                            fontPath: formData.get('font')  // 添加这一行
                         };
                     } else if (formId === 'clockForm') {
                         url = '/clock';
                         data = {
-                            color: formData.get('color')
+                            color: formData.get('color'),
+                            fontPath: formData.get('font'),
+                            formatStr: formData.get('format'),
+                            useNetworkTime: formData.get('networkTime') !== null
                         };
                     }
 
@@ -661,7 +692,10 @@ def index():
        text=session.get('text', ''), color=session.get('color', '#ff0000'), speed=session.get('speed', 5),
        scroll=session.get('scroll', True), uploaded_image=session.get('uploaded_image', ''),
        videos=videos, images=images, rgb_order=session.get('rgb_order', DEFAULT_RGB_ORDER),
-       dark_mode=session.get('dark_mode', False))
+       dark_mode=session.get('dark_mode', False), fonts=fonts,
+       font_path=session.get('font_path', './fonts/DejaVuSans.ttf'),
+       clock_format=session.get('clock_format', '%H:%M:%S'),
+       use_network_time=session.get('use_network_time', False))
 
 @app.route('/rgb/<float:r>/<float:g>/<float:b>')
 def set_rgb(r, g, b):
@@ -688,13 +722,15 @@ def show_text():
     color = data['color']  # 直接使用十六进制字符串
     speed = float(data['speed'])
     scroll = data['scroll']
+    font_path = data['fontPath']  # 添加这一行
     
-    current_thread = ScrollText(text, color, speed, scroll, session.get('rgb_order', DEFAULT_RGB_ORDER))
+    current_thread = ScrollText(text, color, speed, scroll, session.get('rgb_order', DEFAULT_RGB_ORDER), font_path)
     current_thread.start()
     session['text'] = text
     session['color'] = color
     session['speed'] = speed
     session['scroll'] = scroll
+    session['font_path'] = font_path  # 添加这一行
     return "Showing text"
 
 @app.route('/clock', methods=['POST'])
@@ -704,10 +740,16 @@ def show_clock():
     
     data = request.json
     color = data['color']  # 直接使用十六进制字符串
+    font_path = data['fontPath']
+    format_str = data['formatStr']
+    use_network_time = data['useNetworkTime']
     
-    current_thread = ClockDisplay(color, session.get('rgb_order', DEFAULT_RGB_ORDER))
+    current_thread = ClockDisplay(color, session.get('rgb_order', DEFAULT_RGB_ORDER), font_path, format_str, use_network_time)
     current_thread.start()
     session['color'] = color
+    session['font_path'] = font_path
+    session['clock_format'] = format_str
+    session['use_network_time'] = use_network_time
     return "Showing clock"
 
 @app.route('/brightness/<int:brightness>')
