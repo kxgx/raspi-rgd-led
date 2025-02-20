@@ -23,6 +23,8 @@ rgb_factors = [1.0, 1.0, 1.0]  # 初始化 RGB 因子
 # 默认 RGB 硬件顺序
 DEFAULT_RGB_ORDER = "adafruit-hat"
 session_initialized = False
+TEXT_FONTS = "./fonts/原神cn.ttf"
+CLOCK_FONTS = "DejaVuSans.ttf"
 
 # 全局锁
 color_lock = threading.Lock()
@@ -85,8 +87,8 @@ class ClockDisplay(DisplayThread):
         self.base_color = base_color
         self.order = order
         # 假设字体大小对于日期和时间是不同的，因此可以为日期设置一个不同的字体大小
-        self.time_font = ImageFont.truetype("DejaVuSans.ttf", size=10)
-        self.date_font = ImageFont.truetype("DejaVuSans.ttf", size=8)  # 示例：使用较小的字体显示日期
+        self.time_font = ImageFont.truetype(CLOCK_FONTS, size=14)
+        self.date_font = ImageFont.truetype(CLOCK_FONTS, size=10)  # 示例：使用较小的字体显示日期
 
     def run(self):
         image = Image.new("RGB", (matrix.width, matrix.height))
@@ -100,11 +102,11 @@ class ClockDisplay(DisplayThread):
             adjusted_color = hex_to_tuple(self.base_color, self.order)  # 使用 hex_to_tuple 获取 (R, G, B) 元组
             
             # 绘制时间
-            draw.text(((matrix.width-time_width)//2, 10), 
+            draw.text(((matrix.width-time_width)//2, 2), 
                       current_time, font=self.time_font, fill=adjusted_color)
             
             # 绘制日期，假设日期显示在时间下方
-            draw.text(((matrix.width-date_width)//2, 25), 
+            draw.text(((matrix.width-date_width)//2, 15), 
                       current_date, font=self.date_font, fill=adjusted_color)  # 直接使用 (R, G, B) 元组
             
             matrix.SetImage(image)
@@ -119,7 +121,7 @@ class ScrollText(DisplayThread):
         self.speed = speed
         self.scroll = scroll
         self.order = order
-        self.font = ImageFont.truetype("./fonts/原神cn.ttf", size=10)
+        self.font = ImageFont.truetype(TEXT_FONTS, size=10)
 
     def run(self):
         image = Image.new("RGB", (matrix.width, matrix.height))
