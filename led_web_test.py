@@ -20,8 +20,9 @@ current_thread = None
 stop_flag = False
 rgb_factors = [1.0, 1.0, 1.0]  # 初始化 RGB 因子
 
-# 默认的 RGB 顺序
+# 默认 RGB 硬件顺序
 DEFAULT_RGB_ORDER = "adafruit-hat"
+session_initialized = False
 
 # 全局锁
 color_lock = threading.Lock()
@@ -39,13 +40,15 @@ app.url_map.converters['boolean'] = BooleanConverter
 # 初始化 LED 矩阵
 def setup_matrix(pixel_mapper=DEFAULT_RGB_ORDER):
     options = RGBMatrixOptions()
-    options.rows = 32
-    options.cols = 64
-    options.chain_length = 1
-    options.parallel = 1
-    options.hardware_mapping = pixel_mapper  # 设置颜色顺序
-    options.gpio_slowdown = 2
-    options.brightness = 50
+    options.rows = 32       # 面板的行数
+    options.cols = 64       # 面板的列数
+    options.chain_length = 1  # 单个面板，不需要串联
+    options.parallel = 1    # 单个面板，不需要并联
+    options.hardware_mapping = pixel_mapper
+    options.gpio_slowdown = 4  # 根据硬件调整
+    options.brightness = 50    # 初始亮度
+    options.scan_mode = 1  # 常见值为0或1
+    options.multiplexing = 0  # 常见值为0或1
     return RGBMatrix(options=options)
 
 # 应用 RGB 通道调节
@@ -76,13 +79,14 @@ class DisplayThread(threading.Thread):
         super().__init__()
         self.stop_flag = False
 
-# 时钟显示（带 RGB 调节）
 class ClockDisplay(DisplayThread):
     def __init__(self, base_color, order):
         super().__init__()
         self.base_color = base_color
         self.order = order
-        self.font = ImageFont.truetype("DejaVuSans.ttf", size=10)
+        # 假设字体大小对于日期和时间是不同的，因此可以为日期设置一个不同的字体大小
+        self.time_font = ImageFont.truetype("DejaVuSans.ttf", size=10)
+        self.date_font = ImageFont.truetype("DejaVuSans.ttf", size=8)  # 示例：使用较小的字体显示日期
 
     def run(self):
         image = Image.new("RGB", (matrix.width, matrix.height))
@@ -90,10 +94,19 @@ class ClockDisplay(DisplayThread):
         while not self.stop_flag:
             image.paste((0,0,0), (0,0,matrix.width,matrix.height))
             current_time = datetime.datetime.now().strftime("%H:%M:%S")
-            text_width = draw.textlength(current_time, font=self.font)
+            current_date = datetime.datetime.now().strftime("%Y-%m-%d")
+            time_width = draw.textlength(current_time, font=self.time_font)
+            date_width = draw.textlength(current_date, font=self.date_font)
             adjusted_color = hex_to_tuple(self.base_color, self.order)  # 使用 hex_to_tuple 获取 (R, G, B) 元组
-            draw.text(((matrix.width-text_width)//2, 10), 
-                      current_time, font=self.font, fill=adjusted_color)  # 直接使用 (R, G, B) 元组
+            
+            # 绘制时间
+            draw.text(((matrix.width-time_width)//2, 10), 
+                      current_time, font=self.time_font, fill=adjusted_color)
+            
+            # 绘制日期，假设日期显示在时间下方
+            draw.text(((matrix.width-date_width)//2, 25), 
+                      current_date, font=self.date_font, fill=adjusted_color)  # 直接使用 (R, G, B) 元组
+            
             matrix.SetImage(image)
             time.sleep(0.5)
 
@@ -294,6 +307,7 @@ def index():
     videos = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(tuple(ALLOWED_VIDEO_EXTENSIONS))]
     images = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(tuple(ALLOWED_IMAGE_EXTENSIONS))]
     dark_mode = session.get('dark_mode', False)
+    hardware_mapping = session.get('hardware_mapping', DEFAULT_RGB_ORDER)
     return render_template_string('''
         <!DOCTYPE html>
         <html lang="en">
@@ -385,6 +399,12 @@ def index():
                     <button onclick="fetch('/command/clear')">清空屏幕</button>
                     <button onclick="fetch('/command/off')">关闭显示</button>
                     <button onclick="fetch('/command/on')">开启显示</button>
+                    <h3>RGB 硬件映射</h3>
+                    <select id="hardwareMapping" onchange="setHardwareMapping()">
+                        <option value="adafruit-hat" {% if hardware_mapping == 'adafruit-hat' %}selected{% endif %}>Adafruit HAT</option>
+                        <option value="regular" {% if hardware_mapping == 'regular' %}selected{% endif %}>Regular</option>
+                        <option value="adafruit-hat-pwm" {% if hardware_mapping == 'adafruit-hat-pwm' %}selected{% endif %}>Adafruit HAT PWM</option>
+                    </select>
                     <h3>暗黑模式</h3>
                     <label class="switch small-toggle-switch">
                         <input type="checkbox" id="darkModeToggle" {{ 'checked' if dark_mode }}>
@@ -650,7 +670,16 @@ function setRGBOrder() {
             }
         });
 }
-
+function setHardwareMapping() {
+    const selectedMapping = document.getElementById('hardwareMapping').value;
+    fetch(`/hardware_mapping/${selectedMapping}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById('hardwareMapping').value = data.hardware_mapping;
+            }
+        });
+}
 document.getElementById('darkModeToggle').addEventListener('change', function() {
     const isDarkMode = this.checked;
     document.body.className = isDarkMode ? 'dark-mode' : 'light-mode';
@@ -672,7 +701,7 @@ document.getElementById('darkModeToggle').addEventListener('change', function() 
        text=session.get('text', ''), color=session.get('color', '#ff0000'), speed=session.get('speed', 5),
        scroll=session.get('scroll', True), uploaded_image=session.get('uploaded_image', ''),
        videos=videos, images=images, rgb_order=session.get('rgb_order', DEFAULT_RGB_ORDER),
-       dark_mode=session.get('dark_mode', False))
+       dark_mode=session.get('dark_mode', False), hardware_mapping=hardware_mapping)
 
 @app.route('/rgb/<float:r>/<float:g>/<float:b>')
 def set_rgb(r, g, b):
@@ -819,6 +848,22 @@ def play_video_from_url(video_url):
     current_thread.start()
     return "Playing video from URL"
 
+@app.before_request
+def initialize_session():
+    global session_initialized
+    if not session_initialized:
+        session.setdefault('hardware_mapping', DEFAULT_RGB_ORDER)  # 设置默认值
+        session_initialized = True
+
+# 硬件映射路由
+@app.route('/hardware_mapping/<string:mapping>')
+def set_hardware_mapping(mapping):
+    global matrix
+    session['hardware_mapping'] = mapping
+    stop_current()
+    matrix = setup_matrix(mapping)  # 重新初始化矩阵
+    return jsonify({'success': True, 'hardware_mapping': mapping})
+
 @app.route('/dark_mode/<boolean:mode>', methods=['POST'])
 def set_dark_mode(mode):  # 重命名为唯一的名称
     session['dark_mode'] = mode
@@ -834,7 +879,8 @@ def secure_filename(filename):
 
 if __name__ == '__main__':
     check_root_permission()
-    matrix = setup_matrix(DEFAULT_RGB_ORDER)  # 设置硬件映射为 DEFAULT_RGB_ORDER
+    matrix = setup_matrix(DEFAULT_RGB_ORDER)  # 使用默认硬件映射
+    print(f"Matrix configured size: {matrix.width}x{matrix.height}")
     try:
         app.run(host='::', port=8080, debug=False)
     finally:
