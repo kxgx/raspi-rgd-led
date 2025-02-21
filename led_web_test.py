@@ -86,9 +86,9 @@ class ClockDisplay(DisplayThread):
         super().__init__()
         self.base_color = base_color
         self.order = order
-        # 假设字体大小对于日期和时间是不同的，因此可以为日期设置一个不同的字体大小
-        self.time_font = ImageFont.truetype(CLOCK_FONTS, size=14)
-        self.date_font = ImageFont.truetype(CLOCK_FONTS, size=10)  # 示例：使用较小的字体显示日期
+        font_file = session.get('CLOCK_FONTS', 'DejaVuSans.ttf')
+        self.time_font = ImageFont.truetype(f"./fonts/{font_file}", size=14)
+        self.date_font = ImageFont.truetype(f"./fonts/{font_file}", size=10)
 
     def run(self):
         image = Image.new("RGB", (matrix.width, matrix.height))
@@ -122,7 +122,8 @@ class ScrollText(DisplayThread):
         self.scroll = scroll
         self.order = order
         self.font = ImageFont.truetype(TEXT_FONTS, size=10)
-
+        font_file = session.get('TEXT_FONTS', '原神cn.ttf')
+        self.font = ImageFont.truetype(f"./fonts/{font_file}", size=10)
     def run(self):
         image = Image.new("RGB", (matrix.width, matrix.height))
         draw = ImageDraw.Draw(image)
@@ -510,6 +511,21 @@ input:checked + .slider:before {
                 </div>
 
                 <div class="control-group">
+<!-- 文本字体选择 -->
+<h3>文本字体选择</h3>
+<select id="textFontSelect" onchange="setTextFont(this.value)">
+    {% for font in fonts %}
+        <option value="{{ font }}" {% if session.text_font == font %}selected{% endif %}>{{ font }}</option>
+    {% endfor %}
+</select>
+
+<!-- 时钟字体选择 -->
+<h3>时钟字体选择</h3>
+<select id="clockFontSelect" onchange="setClockFont(this.value)">
+    {% for font in fonts %}
+        <option value="{{ font }}" {% if session.clock_font == font %}selected{% endif %}>{{ font }}</option>
+    {% endfor %}
+</select>
                     <h3>文本显示</h3>
                     <form id="textForm" onsubmit="return submitForm(event)">
                         <input type="text" name="text" placeholder="输入文字" required value="{{ text }}">
@@ -571,7 +587,22 @@ input:checked + .slider:before {
             </div>
 
             <script>
-                // 获取初始状态
+// 加载字体列表
+fetch('/fonts')
+    .then(response => response.json())
+    .then(fonts => {
+        const textSelect = document.getElementById('textFontSelect');
+        const clockSelect = document.getElementById('clockFontSelect');
+        
+        fonts.forEach(font => {
+            textSelect.appendChild(new Option(font, font));
+            clockSelect.appendChild(new Option(font, font));
+        });
+        
+        // 设置当前选择的字体
+        textSelect.value = '{{ session.text_font|default("原神cn.ttf") }}';
+        clockSelect.value = '{{ session.clock_font|default("DejaVuSans.ttf") }}';
+    });
 // 获取初始状态
 fetch('/status')
     .then(response => response.json())
@@ -618,7 +649,25 @@ function applyRGB() {
         }
     });
 }
+function setTextFont(font) {
+    fetch(`/set_text_font/${encodeURIComponent(font)}`)
+        .then(response => response.json())
+        .then(data => {
+            if(data.success) {
+                console.log('文本字体已更新:', data.current_font);
+            }
+        });
+}
 
+function setClockFont(font) {
+    fetch(`/set_clock_font/${encodeURIComponent(font)}`)
+        .then(response => response.json())
+        .then(data => {
+            if(data.success) {
+                console.log('时钟字体已更新:', data.current_font);
+            }
+        });
+}
                 // 设置亮度
 function setBrightness() {
     const brightness = parseInt(document.getElementById('brightness').value);
@@ -764,11 +813,30 @@ document.getElementById('darkModeToggle').addEventListener('change', function() 
             </script>
         </body>
         </html>
-    ''', rgb=session.get('rgb', [1.0, 1.0, 1.0]), brightness=session.get('brightness', 50),
+    ''', rgb=session.get('rbg', [1.0, 1.0, 1.0]), brightness=session.get('brightness', 50),
        text=session.get('text', ''), color=session.get('color', '#ffffff'), speed=session.get('speed', 5),
        scroll=session.get('scroll', True), uploaded_image=session.get('uploaded_image', ''),
        videos=videos, images=images, rgb_order=session.get('rgb_order', DEFAULT_RGB_ORDER),
        dark_mode=session.get('dark_mode', False), hardware_mapping=hardware_mapping)
+
+@app.route('/fonts')
+def list_fonts():
+    fonts = []
+    font_dir = os.path.join(os.path.dirname(__file__), "fonts")
+    for filename in os.listdir(font_dir):
+        if filename.lower().endswith(('.ttf', '.otf')):
+            fonts.append(filename)
+    return jsonify(fonts)
+
+@app.route('/set_text_font/<font>')
+def set_text_font(font):
+    session['text_font'] = font
+    return jsonify(success=True, current_font=font)
+
+@app.route('/set_clock_font/<font>')
+def set_clock_font(font):
+    session['clock_font'] = font
+    return jsonify(success=True, current_font=font)
 
 @app.route('/rgb/<float:r>/<float:g>/<float:b>')
 def set_rgb(r, g, b):
