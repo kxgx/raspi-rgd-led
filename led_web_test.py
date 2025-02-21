@@ -47,7 +47,7 @@ def setup_matrix(pixel_mapper=DEFAULT_RGB_ORDER):
     options.chain_length = 1  # 单个面板，不需要串联
     options.parallel = 1    # 单个面板，不需要并联
     options.hardware_mapping = pixel_mapper
-    options.gpio_slowdown = 4  # 根据硬件调整
+    options.gpio_slowdown = 1  # 根据硬件调整
     options.brightness = 50    # 初始亮度
     options.scan_mode = 1  # 常见值为0或1
     options.multiplexing = 0  # 常见值为0或1
@@ -317,81 +317,146 @@ def index():
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>LED Matrix Control</title>
-            <style>
-                body.light-mode {
-                    background-color: #fff;
-                    color: #333;
-                }
-                body.dark-mode {
-                    background-color: #333;
-                    color: #fff;
-                }
-                .container { max-width: 800px; margin: 0 auto; padding: 20px; }
-                .control-group { margin: 10px 0; padding: 15px; border: 1px solid #ccc; }
-                .rgb-control { display: flex; align-items: center; margin: 5px 0; }
-                .channel-label { width: 60px; }
-                .red { color: #ff0000; }
-                .green { color: #00ff00; }
-                .blue { color: #0000ff; }
-                .video-list { list-style-type: none; padding: 0; }
-                .video-item { cursor: pointer; padding: 5px; border-bottom: 1px solid #eee; }
-                .video-item:hover { background-color: #f0f0f0; }
-                .image-list { list-style-type: none; padding: 0; }
-                .image-item { cursor: pointer; padding: 5px; border-bottom: 1px solid #eee; }
-                .image-item:hover { background-color: #f0f0f0; }
-                button { margin-top: 10px; }
-                .toggle-switch {
-                    position: relative;
-                    display: inline-block;
-                    width: 60px;
-                    height: 34px;
-                }
-                .toggle-switch input { opacity: 0; width: 0; height: 0; }
-                .slider {
-                    position: absolute;
-                    cursor: pointer;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    bottom: 0;
-                    background-color: #ccc;
-                    transition: .4s;
-                    border-radius: 34px;
-                }
-                .slider:before {
-                    position: absolute;
-                    content: "";
-                    height: 26px;
-                    width: 26px;
-                    left: 4px;
-                    bottom: 4px;
-                    background-color: white;
-                    transition: .4s;
-                    border-radius: 50%;
-                }
-                input:checked + .slider {
-                    background-color: #2196F3;
-                }
-                input:checked + .slider:before {
-                    transform: translateX(26px);
-                }
-                .small-toggle-switch {
-                    width: 50px;
-                    height: 26px;
-                }
-                .small-slider {
-                    height: 22px;
-                    width: 22px;
-                    border-radius: 22px;
-                }
-                .small-slider:before {
-                    height: 18px;
-                    width: 18px;
-                    bottom: 2px;
-                    left: 2px;
-                    border-radius: 50%;
-                }
-            </style>
+<style>
+/* 基础样式 */
+body.light-mode {
+    background-color: #fff;
+    color: #333;
+}
+body.dark-mode {
+    background-color: #333;
+    color: #fff;
+}
+
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+
+.control-group {
+    margin: 10px 0;
+    padding: 15px;
+    border: 1px solid #ccc;
+    flex: 1 1 300px;
+    min-width: 300px;
+}
+
+.rgb-control {
+    display: flex;
+    align-items: center;
+    margin: 5px 0;
+}
+
+.channel-label { width: 60px; }
+.red { color: #ff0000; }
+.green { color: #00ff00; }
+.blue { color: #0000ff; }
+
+.video-list, .image-list {
+    list-style-type: none;
+    padding: 0;
+}
+
+.video-item, .image-item {
+    cursor: pointer;
+    padding: 5px;
+    border-bottom: 1px solid #eee;
+}
+
+.video-item:hover, .image-item:hover {
+    background-color: #f0f0f0;
+}
+
+button {
+    margin-top: 10px;
+}
+
+/* 开关样式 */
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 60px;
+    height: 34px;
+}
+.toggle-switch input { 
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    transition: .4s;
+    border-radius: 34px;
+}
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 26px;
+    width: 26px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    transition: .4s;
+    border-radius: 50%;
+}
+input:checked + .slider {
+    background-color: #2196F3;
+}
+input:checked + .slider:before {
+    transform: translateX(26px);
+}
+
+/* 小尺寸开关 */
+.small-toggle-switch {
+    width: 50px;
+    height: 26px;
+}
+.small-slider {
+    height: 22px;
+    width: 22px;
+    border-radius: 22px;
+}
+.small-slider:before {
+    height: 18px;
+    width: 18px;
+    bottom: 2px;
+    left: 2px;
+}
+
+/* 响应式设计 */
+@media (max-width: 600px) {
+    .control-group {
+        flex-direction: column;
+    }
+    .rgb-control {
+        flex-wrap: wrap;
+    }
+    input[type="number"],
+    input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+    }
+    button {
+        width: 100%;
+        padding: 12px;
+    }
+    
+    /* 移动端暗黑模式调整 */
+    body.dark-mode .control-group {
+        border-color: #666;
+    }
+}
+</style>
         </head>
         <body class="{{ 'dark-mode' if dark_mode else 'light-mode' }}">
             <div class="container">
@@ -700,7 +765,7 @@ document.getElementById('darkModeToggle').addEventListener('change', function() 
         </body>
         </html>
     ''', rgb=session.get('rgb', [1.0, 1.0, 1.0]), brightness=session.get('brightness', 50),
-       text=session.get('text', ''), color=session.get('color', '#ff0000'), speed=session.get('speed', 5),
+       text=session.get('text', ''), color=session.get('color', '#ffffff'), speed=session.get('speed', 5),
        scroll=session.get('scroll', True), uploaded_image=session.get('uploaded_image', ''),
        videos=videos, images=images, rgb_order=session.get('rgb_order', DEFAULT_RGB_ORDER),
        dark_mode=session.get('dark_mode', False), hardware_mapping=hardware_mapping)
