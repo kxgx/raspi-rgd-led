@@ -1,13 +1,26 @@
 #!/usr/bin/env python3
 from flask import Flask, request, render_template_string, session, jsonify, send_from_directory, redirect, url_for
-from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
-from PIL import Image, ImageDraw, ImageFont, ImageSequence
-import cv2, time, threading, datetime, os, sys, re
+import cv2, time, threading, datetime, os, sys, re, subprocess, signal
 import numpy as np
 from werkzeug.utils import secure_filename
+from werkzeug.routing import BaseConverter
+
+class BooleanConverter(BaseConverter):
+    """自定义布尔类型转换器"""
+    def to_python(self, value):
+        # 将 URL 中的字符串转换为 Python 的布尔值
+        return value.lower() in ['true', 'yes', 't', '1']
+
+    def to_url(self, value):
+        # 将 Python 的布尔值转换为 URL 中的字符串
+        return str(value).lower()
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'  # 设置一个密钥用于session加密
+app.url_map.converters['boolean'] = BooleanConverter
+app.secret_key = 'your_secret_key'
+
+# 定义全局变量
+session_initialized = False
 
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -15,251 +28,53 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'avi'}
 ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'avi'}  # 新增视频文件扩展名
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
-matrix = None
-current_thread = None
-stop_flag = False
-rgb_factors = [1.0, 1.0, 1.0]  # 初始化 RGB 因子
+current_process = None
+stop_event = threading.Event()
+DEFAULT_RGB_ORDER = "adafruit-hat" 
+# 硬件配置默认值
+HARDWARE_CONFIG = {
+    'rows': 32,
+    'cols': 64,
+    'chain': 1,
+    'parallel': 1,
+    'gpio_mapping': 'adafruit-hat',
+    'brightness': 50,
+    'pwm_bits': 11,
+    'rgb_sequence': 'RBG'
+}
 
-# 默认 RGB 硬件顺序
-DEFAULT_RGB_ORDER = "adafruit-hat"
-session_initialized = False
-TEXT_FONTS = "./fonts/原神cn.ttf"
-CLOCK_FONTS = "DejaVuSans.ttf"
+def build_base_args():
+    return [
+        f"--led-rows={HARDWARE_CONFIG['rows']}",
+        f"--led-cols={HARDWARE_CONFIG['cols']}",
+        f"--led-chain={HARDWARE_CONFIG['chain']}",
+        f"--led-parallel={HARDWARE_CONFIG['parallel']}",
+        f"--led-gpio-mapping={HARDWARE_CONFIG['gpio_mapping']}",
+        f"--led-brightness={HARDWARE_CONFIG['brightness']}",
+        f"--led-pwm-bits={HARDWARE_CONFIG['pwm_bits']}",
+        f"--led-rgb-sequence={HARDWARE_CONFIG['rgb_sequence']}"
+    ]
 
-# 全局锁
-color_lock = threading.Lock()
+def run_command(cmd_args):
+    global current_process
+    stop_current()
+    # 添加错误处理
+    try:
+        current_process = subprocess.Popen(
+            cmd_args,
+            preexec_fn=os.setsid  # 创建进程组以便终止整个进程树
+        )
+    except Exception as e:
+        print(f"Command failed: {e}")
 
-# 自定义布尔类型转换器
-class BooleanConverter(app.url_map.converters['default']):
-    def to_python(self, value):
-        return value.lower() in ['true', 'yes', 't', '1']
-
-    def to_url(self, value):
-        return str(value).lower()
-
-app.url_map.converters['boolean'] = BooleanConverter
-
-# 初始化 LED 矩阵
-def setup_matrix(pixel_mapper=DEFAULT_RGB_ORDER):
-    options = RGBMatrixOptions()
-    options.rows = 32       # 面板的行数
-    options.cols = 64       # 面板的列数
-    options.chain_length = 1  # 单个面板，不需要串联
-    options.parallel = 1    # 单个面板，不需要并联
-    options.hardware_mapping = pixel_mapper
-    options.gpio_slowdown = 1  # 根据硬件调整
-    options.brightness = 50    # 初始亮度
-    options.scan_mode = 1  # 常见值为0或1
-    options.multiplexing = 0  # 常见值为0或1
-    return RGBMatrix(options=options)
-
-# 应用 RGB 通道调节
-def apply_rgb_factor(color, order=DEFAULT_RGB_ORDER):
-    r, g, b = color
-    if order == "grb":
-        return (g, r, b)
-    elif order == "rbg":
-        return (r, b, g)
-    elif order == "brg":
-        return (b, r, g)
-    elif order == "bgr":
-        return (b, g, r)
-    else:  # regular
-        return (r, g, b)
-
-# 十六进制颜色转换为 (R, G, B) 元组（调整 RGB 顺序）
-def hex_to_tuple(hex_color, order=DEFAULT_RGB_ORDER):
-    r = int(hex_color[1:3], 16)
-    g = int(hex_color[3:5], 16)
-    b = int(hex_color[5:7], 16)
-    adjusted_color = apply_rgb_factor((r, g, b), order)  # 调整为 (r, g, b)
-    return adjusted_color  # 返回 (R, G, B) 元组
-
-# 显示线程基类
-class DisplayThread(threading.Thread):
-    def __init__(self):
-        super().__init__()
-        self.stop_flag = False
-
-class ClockDisplay(DisplayThread):
-    def __init__(self, base_color, order):
-        super().__init__()
-        self.base_color = base_color
-        self.order = order
-        font_file = session.get('CLOCK_FONTS', 'DejaVuSans.ttf')
-        self.time_font = ImageFont.truetype(f"./fonts/{font_file}", size=14)
-        self.date_font = ImageFont.truetype(f"./fonts/{font_file}", size=10)
-
-    def run(self):
-        image = Image.new("RGB", (matrix.width, matrix.height))
-        draw = ImageDraw.Draw(image)
-        while not self.stop_flag:
-            image.paste((0,0,0), (0,0,matrix.width,matrix.height))
-            current_time = datetime.datetime.now().strftime("%H:%M:%S")
-            current_date = datetime.datetime.now().strftime("%Y-%m-%d")
-            time_width = draw.textlength(current_time, font=self.time_font)
-            date_width = draw.textlength(current_date, font=self.date_font)
-            adjusted_color = hex_to_tuple(self.base_color, self.order)  # 使用 hex_to_tuple 获取 (R, G, B) 元组
-            
-            # 绘制时间
-            draw.text(((matrix.width-time_width)//2, 2), 
-                      current_time, font=self.time_font, fill=adjusted_color)
-            
-            # 绘制日期，假设日期显示在时间下方
-            draw.text(((matrix.width-date_width)//2, 15), 
-                      current_date, font=self.date_font, fill=adjusted_color)  # 直接使用 (R, G, B) 元组
-            
-            matrix.SetImage(image)
-            time.sleep(0.5)
-
-# 文字显示（带 RGB 调节）
-class ScrollText(DisplayThread):
-    def __init__(self, text, base_color, speed, scroll, order):
-        super().__init__()
-        self.text = text
-        self.base_color = base_color
-        self.speed = speed
-        self.scroll = scroll
-        self.order = order
-        self.font = ImageFont.truetype(TEXT_FONTS, size=10)
-        font_file = session.get('TEXT_FONTS', '原神cn.ttf')
-        self.font = ImageFont.truetype(f"./fonts/{font_file}", size=10)
-    def run(self):
-        image = Image.new("RGB", (matrix.width, matrix.height))
-        draw = ImageDraw.Draw(image)
-        text_width = draw.textlength(self.text, font=self.font)
-        pos = matrix.width if self.scroll else (matrix.width - text_width)//2
-        
-        while not self.stop_flag:
-            image.paste((0,0,0), (0,0,matrix.width,matrix.height))
-            adjusted_color = hex_to_tuple(self.base_color, self.order)  # 使用 hex_to_tuple 获取 (R, G, B) 元组
-            draw.text((pos, 10), self.text, font=self.font, fill=adjusted_color)  # 直接使用 (R, G, B) 元组
-            matrix.SetImage(image)
-            if self.scroll:
-                pos -= 1
-                if pos + text_width < 0:
-                    pos = matrix.width
-            time.sleep(0.05 / self.speed)
-
-# 图像显示
-class ImageDisplay(DisplayThread):
-    def __init__(self, image_path, order):
-        super().__init__()
-        self.image_path = image_path
-        self.order = order
-
-    def adjust_frame(self, frame):
-        """
-        调整图像帧的 RGB 通道
-        """
-        # 将 PIL 图像转换为 NumPy 数组
-        frame_np = np.array(frame)
-
-        # 应用 RGB 调整因子
-        frame_np = frame_np.astype('float32')  # 转换为浮点数以便调整
-        frame_np[..., 0] *= rgb_factors[0]  # 红色通道
-        frame_np[..., 1] *= rgb_factors[1]  # 绿色通道
-        frame_np[..., 2] *= rgb_factors[2]  # 蓝色通道
-
-        # 限制像素值在 0-255 范围内
-        frame_np = np.clip(frame_np, 0, 255).astype('uint8')
-
-        # 应用 RGB 通道顺序调整
-        if self.order == "grb":
-            frame_np = frame_np[..., [1, 0, 2]]  # GRB 顺序
-        elif self.order == "rbg":
-            frame_np = frame_np[..., [0, 2, 1]]  # RBG 顺序
-        elif self.order == "brg":
-            frame_np = frame_np[..., [2, 0, 1]]  # BRG 顺序
-        elif self.order == "bgr":
-            frame_np = frame_np[..., [2, 1, 0]]  # BGR 顺序
-        # 默认是 RGB 顺序，无需调整
-
-        # 将 NumPy 数组转换回 PIL 图像
-        return Image.fromarray(frame_np)
-
-    def run(self):
-        try:
-            image = Image.open(self.image_path).convert('RGB')
-            if image.format == 'GIF':
-                # 处理 GIF 动画
-                frames = [self.adjust_frame(frame.copy()) 
-                         for frame in ImageSequence.Iterator(image)]
-            else:
-                # 处理静态图像
-                frames = [self.adjust_frame(image.copy())]
-
-            while not self.stop_flag:
-                for frame in frames:
-                    resized_frame = frame.resize((matrix.width, matrix.height), Image.LANCZOS)
-                    matrix.SetImage(resized_frame.convert('RGB'))
-                    duration = frame.info.get('duration', 100) / 1000.0  # 使用帧的持续时间
-                    time.sleep(duration)
-        except Exception as e:
-            print(f"Error displaying image: {e}")
-
-# 视频显示
-class VideoDisplay(DisplayThread):
-    def __init__(self, video_source, order):
-        super().__init__()
-        self.video_source = video_source
-        self.order = order
-
-    def adjust_frame(self, frame):
-        """
-        调整视频帧的 RGB 通道
-        """
-        # 应用 RGB 调整因子
-        frame = frame.astype('float32')  # 转换为浮点数以便调整
-        frame[..., 0] *= rgb_factors[0]  # 红色通道
-        frame[..., 1] *= rgb_factors[1]  # 绿色通道
-        frame[..., 2] *= rgb_factors[2]  # 蓝色通道
-
-        # 限制像素值在 0-255 范围内
-        frame = np.clip(frame, 0, 255).astype('uint8')
-
-        # 应用 RGB 通道顺序调整
-        if self.order == "grb":
-            frame = frame[..., [1, 0, 2]]  # GRB 顺序
-        elif self.order == "rbg":
-            frame = frame[..., [0, 2, 1]]  # RBG 顺序
-        elif self.order == "brg":
-            frame = frame[..., [2, 0, 1]]  # BRG 顺序
-        elif self.order == "bgr":
-            frame = frame[..., [2, 1, 0]]  # BGR 顺序
-        # 默认是 RGB 顺序，无需调整
-
-        return frame
-
-    def run(self):
-        cap = cv2.VideoCapture(self.video_source)
-        if not cap.isOpened():
-            print(f"Error opening video source: {self.video_source}")
-            return
-
-        while not self.stop_flag:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            try:
-                # 颜色转换和调整
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame = self.adjust_frame(frame)
-                img = Image.fromarray(frame)
-                matrix.SetImage(img.resize((matrix.width, matrix.height)))
-            except Exception as e:
-                print(f"Error processing frame: {e}")
-
-        cap.release()
-
-# 停止当前显示线程
 def stop_current():
-    global current_thread
-    if current_thread and current_thread.is_alive():
-        current_thread.stop_flag = True
-        current_thread.join()
-        current_thread = None
+    global current_process
+    if current_process:
+        try:
+            os.killpg(os.getpgid(current_process.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        current_process = None
 
 # 检查是否以root权限运行
 def check_root_permission():
@@ -457,6 +272,13 @@ input:checked + .slider:before {
         border-color: #666;
     }
 }
+input[type="number"] {
+    width: 80px;
+    margin: 5px;
+    padding: 4px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
 </style>
         </head>
         <body class="{{ 'dark-mode' if dark_mode else 'light-mode' }}">
@@ -530,6 +352,8 @@ input:checked + .slider:before {
                     <form id="textForm" onsubmit="return submitForm(event)">
                         <input type="text" name="text" placeholder="输入文字" required value="{{ text }}">
                         <input type="color" name="color" value="{{ color }}">
+                        <input type="number" name="x" placeholder="X坐标" value="0">
+                        <input type="number" name="y" placeholder="Y坐标" value="0">
                         <input type="range" name="speed" min="1" max="10" step="1" value="{{ speed }}">
                         <label><input type="checkbox" name="scroll" {{ 'checked' if scroll else '' }}> 滚动</label>
                         <button type="submit">显示</button>
@@ -537,6 +361,8 @@ input:checked + .slider:before {
                     <h3>时钟显示</h3>
                     <form id="clockForm" onsubmit="return submitForm(event)">
                         <input type="color" name="color" value="{{ color }}">
+                        <input type="number" name="x" placeholder="X坐标" value="0">
+                        <input type="number" name="y" placeholder="Y坐标" value="0">
                         <button type="submit">显示时钟</button>
                     </form>
                     <h3>亮度调节</h3>
@@ -600,8 +426,8 @@ fetch('/fonts')
         });
         
         // 设置当前选择的字体
-        textSelect.value = '{{ session.text_font|default("原神cn.ttf") }}';
-        clockSelect.value = '{{ session.clock_font|default("DejaVuSans.ttf") }}';
+        textSelect.value = '{{ session.text_font|default("原神cn.bdf") }}';
+        clockSelect.value = '{{ session.clock_font|default("6x13.bdf") }}';
     });
 // 获取初始状态
 fetch('/status')
@@ -696,13 +522,17 @@ function submitForm(event) {
         data = {
             text: formData.get('text'),
             color: formData.get('color'),
+            x: parseInt(formData.get('x')) || 0,
+            y: parseInt(formData.get('y')) || 0,
             speed: parseFloat(formData.get('speed')),
             scroll: formData.get('scroll') !== null
         };
     } else if (formId === 'clockForm') {
         url = '/clock';
         data = {
-            color: formData.get('color')
+            color: formData.get('color'),
+            x: parseInt(formData.get('x')) || 0,
+            y: parseInt(formData.get('y')) || 0
         };
     }
 
@@ -822,10 +652,21 @@ document.getElementById('darkModeToggle').addEventListener('change', function() 
 @app.route('/fonts')
 def list_fonts():
     fonts = []
-    font_dir = os.path.join(os.path.dirname(__file__), "fonts")
-    for filename in os.listdir(font_dir):
-        if filename.lower().endswith(('.ttf', '.otf')):
-            fonts.append(filename)
+    try:
+        # 使用动态路径获取方式
+        font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "./rpi-rgb-led-matrix/fonts")
+        
+        # 添加目录存在性检查
+        if not os.path.exists(font_dir):
+            os.makedirs(font_dir, exist_ok=True)
+            os.chmod(font_dir, 0o755)  # 设置适当权限
+        for filename in os.listdir(font_dir):
+            if filename.lower().endswith(('.ttf', '.otf', '.woff2', '.ttc', '.bdf')):
+                fonts.append(filename)
+    except Exception as e:
+        print(f"Error accessing fonts directory: {e}")
+        return jsonify([])  # 返回空列表而不是500错误
+    
     return jsonify(fonts)
 
 @app.route('/set_text_font/<font>')
@@ -838,16 +679,6 @@ def set_clock_font(font):
     session['clock_font'] = font
     return jsonify(success=True, current_font=font)
 
-@app.route('/rgb/<float:r>/<float:g>/<float:b>')
-def set_rgb(r, g, b):
-    global rgb_factors
-    with color_lock:
-        rgb_factors = [max(0, min(1, r)),
-                       max(0, min(1, g)),
-                       max(0, min(1, b))]
-    session['rgb'] = rgb_factors
-    return jsonify({'success': True, 'rgb': rgb_factors})
-
 @app.route('/rgb_order/<string:order>')
 def set_rgb_order(order):
     session['rgb_order'] = order
@@ -855,74 +686,78 @@ def set_rgb_order(order):
 
 @app.route('/text', methods=['POST'])
 def show_text():
-    global current_thread
-    stop_current()
-    
     data = request.json
     text = data['text']
-    color = data['color']  # 直接使用十六进制字符串
-    speed = float(data['speed'])
-    scroll = data['scroll']
+    color = data['color'].lstrip('#')
+    r, g, b = [int(color[i:i+2], 16) for i in (0, 2, 4)]
+    speed = data['speed']
+    x = data.get('x', 0)  # 新增x坐标
+    y = data.get('y', 0)  # 新增y坐标
+    scroll_direction = -abs(speed) if data.get('scroll', True) else abs(speed)
+    font = session.get('text_font', '原神cn.bdf')
+
+    cmd = [
+        'text-scroller',
+        '-s', str(scroll_direction),
+        '-f', f'./rpi-rgb-led-matrix/fonts/{font}',
+        '-x', str(x),  # 新增x参数
+        '-y', str(y),  # 新增y参数
+        '-C', f'{r},{g},{b}',
+        '-l', '-1'
+    ] + build_base_args() + [text]
     
-    current_thread = ScrollText(text, color, speed, scroll, session.get('rgb_order', DEFAULT_RGB_ORDER))
-    current_thread.start()
-    session['text'] = text
-    session['color'] = color
-    session['speed'] = speed
-    session['scroll'] = scroll
-    return "Showing text"
+    run_command(cmd)
+    return jsonify(success=True)
 
 @app.route('/clock', methods=['POST'])
 def show_clock():
-    global current_thread
-    stop_current()
-    
     data = request.json
-    color = data['color']  # 获取时钟颜色
-    session['clock_color'] = color  # 存储时钟颜色到 session
+    color = data.get('color', '#FFFF00').lstrip('#')
+    r, g, b = [int(color[i:i+2], 16) for i in (0, 2, 4)]
+    x = data.get('x', 0)  # 新增x坐标
+    y = data.get('y', 0)  # 新增y坐标
+    font = session.get('clock_font', '6x13.bdf')
+
+    cmd = [
+        'clock',
+        '-f', f'./rpi-rgb-led-matrix/fonts/{font}',
+        '-x', str(x),  # 新增x参数
+        '-y', str(y),  # 新增y参数
+        '-C', f'{r},{g},{b}',
+        '-d', '%H:%M:%S',
+        '-d', '%Y-%m-%d'
+    ] + build_base_args()
     
-    current_thread = ClockDisplay(color, session.get('rgb_order', DEFAULT_RGB_ORDER))
-    current_thread.start()
-    return "Showing clock"
+    run_command(cmd)
+    return jsonify(success=True)
 
 @app.route('/brightness/<int:brightness>')
 def set_brightness(brightness):
-    matrix.brightness = brightness
     session['brightness'] = brightness
     return jsonify({'success': True, 'brightness': brightness})
 
-@app.route('/dark_mode/<boolean:mode>', methods=['POST'])
-def toggle_dark_mode(mode):
-    session['dark_mode'] = mode
-    return jsonify({'success': True, 'dark_mode': mode})
-
 @app.route('/rgb/<float:r>/<float:g>/<float:b>')
-def set_rgb_values(r, g, b):  # 重命名为唯一的名称
-    global rgb_factors
-    with color_lock:
-        rgb_factors = [max(0, min(1, r)),
-                       max(0, min(1, g)),
-                       max(0, min(1, b))]
-    session['rgb'] = rgb_factors
-    return jsonify({'success': True, 'rgb': rgb_factors})
+def set_rgb(r, g, b):
+    # 实际需要将颜色设置应用到命令行工具参数
+    session['rgb'] = [r, g, b]
+    return jsonify(success=True)
 
 @app.route('/command/<cmd>')
 def command(cmd):
-    global current_thread
-    stop_current()
-    
     if cmd == 'clear':
-        matrix.Clear()
-        return "Screen cleared"
+        # 终止当前运行的进程来清屏
+        stop_current()
+        return jsonify(success=True, message="Screen cleared")
     elif cmd == 'off':
-        matrix.brightness = 0
-        session['brightness'] = 0
-        return "Display off"
+        # 设置亮度为0
+        run_command(['text-scroller', '-C', '0,0,0', '-B', '0,0,0', ' '])  # 显示黑色背景
+        return jsonify(success=True, message="Display turned off")
     elif cmd == 'on':
-        matrix.brightness = 50
-        session['brightness'] = 50
-        return "Display on"
-    return "Unknown command"
+        # 恢复默认亮度
+        run_command(['text-scroller', '-C', '255,255,255', '-B', '0,0,0', ' '])  # 显示白色背景
+        return jsonify(success=True, message="Display turned on")
+    else:
+        return jsonify(success=False, message="Unknown command")
 
 @app.route('/upload_image', methods=['POST'])
 def upload_image():
@@ -951,17 +786,25 @@ def upload_video():
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-@app.route('/video/<path:video_source>')
-def play_video(video_source):
-    global current_thread
-    stop_current()
+@app.route('/video/<filename>')
+def play_video(filename):
+    video_path = os.path.join(UPLOAD_FOLDER, filename)
+    cmd = [
+        'video-viewer',
+        '--led-slowdown-gpio=2',
+        '-f'  # 全屏模式
+    ] + build_base_args() + [video_path]
     
-    session['video_source'] = video_source
-    video_path = os.path.join(UPLOAD_FOLDER, video_source)
-    current_thread = VideoDisplay(video_path, session.get('rgb_order', DEFAULT_RGB_ORDER))
-    current_thread.start()
-    return "Playing video"
+    run_command(cmd)
+    return jsonify(success=True)
 
+@app.route('/hardware', methods=['POST'])
+def update_hardware():
+    config = request.json
+    for key in HARDWARE_CONFIG:
+        if key in config:
+            HARDWARE_CONFIG[key] = config[key]
+    return jsonify(success=True)
 @app.route('/image/<path:image_source>')
 def show_image(image_source):
     global current_thread
@@ -993,12 +836,9 @@ def initialize_session():
 # 硬件映射路由
 @app.route('/hardware_mapping/<string:mapping>')
 def set_hardware_mapping(mapping):
-    global matrix
+    HARDWARE_CONFIG['gpio_mapping'] = mapping
     session['hardware_mapping'] = mapping
-    stop_current()
-    matrix = setup_matrix(mapping)  # 重新初始化矩阵
-    return jsonify({'success': True, 'hardware_mapping': mapping})
-
+    return jsonify(success=True)
 @app.route('/dark_mode/<boolean:mode>', methods=['POST'])
 def set_dark_mode(mode):  # 重命名为唯一的名称
     session['dark_mode'] = mode
@@ -1014,10 +854,7 @@ def secure_filename(filename):
 
 if __name__ == '__main__':
     check_root_permission()
-    matrix = setup_matrix(DEFAULT_RGB_ORDER)  # 使用默认硬件映射
-    print(f"Matrix configured size: {matrix.width}x{matrix.height}")
     try:
         app.run(host='::', port=8080, debug=False)
     finally:
-        matrix.Clear()
         stop_current()
